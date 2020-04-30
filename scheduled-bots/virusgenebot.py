@@ -53,12 +53,9 @@ import pprint
 from datetime import datetime
 import requests
 from wikidataintegrator import wdi_core, wdi_login
-from rdflib import Graph, URIRef
 from Bio import Entrez,SeqIO
-import ftplib
-import urllib.request
-import gzip
-import re
+from wikidataintegrator.wdi_helpers import try_write
+
 
 
 # Wikidata provenance reference for NCBI Taxonomy
@@ -120,7 +117,6 @@ def set_taxon(taxid):
       item.set_aliases(aliases=[scientificName])
   if item.get_description(lang="en") == "":
       item.set_description(description="strain of virus", lang="en")
-
   return item
 
 
@@ -137,7 +133,6 @@ def create_or_update_uniprot_protein_item(geneid, uniprotID):
             rdfs:seeAlso ?id .
             ?id <http://purl.uniprot.org/core/database> ?database .
         }}"""
-    print(query)
 
     results = wdi_core.WDItemEngine.execute_sparql_query(query, endpoint="https://sparql.uniprot.org/sparql")
     refseq = []
@@ -196,11 +191,12 @@ def create_or_update_uniprot_protein_item(geneid, uniprotID):
         protein_item.set_description("Proteina in " + taxonname, lang="it")
 
     print(protein_item.get_wd_json_representation())
-    protein_qid = protein_item.write(login)
-    print(protein_qid)
+    try_write(protein_item, record_id=geneid, record_prop="P352",
+              edit_summary="Updated a virus protein item with Uniprot", login=login)
+    print(protein_item.wd_item_id)
 
     ## add the newly create protein item to the gene item
-    encodes = [wdi_core.WDItemID(protein_qid, prop_nr="P688", references=[copy.deepcopy(ncbi_reference)])]
+    encodes = [wdi_core.WDItemID(protein_item.wd_item_id, prop_nr="P688", references=[copy.deepcopy(ncbi_reference)])]
     geneitem = wdi_core.WDItemEngine(wd_item_id=geneqid, data=encodes)
     return geneitem.write(login)
 
@@ -234,7 +230,16 @@ def create_or_update_refseq_protein_item(geneid, refseqID):
             protein_label = feature.qualifiers['product'][0]
     taxonname = getTaxonItem(geneJson['claims']["P703"][0]["mainsnak"]["datavalue"]["value"]["id"]).get_label(lang="en")
 
-    protein_item = wdi_core.WDItemEngine(data=statements)
+    query = "SELECT * WHERE {VALUES ?refseqID {\"NP_828851.1\"} ?protein wdt:P637 ?refseqID .}"
+    results = wdi_core.WDItemEngine.execute_sparql_query(query)
+
+    if len(results["results"]["bindings"]) == 0:
+        protein_item = wdi_core.WDItemEngine(data=statements)
+    elif len(results["results"]["bindings"]) == 1:
+        protein_item = wdi_core.WDItemEngine(wd_item_id=results["results"]["bindings"][0]["protein"]["value"])
+    else:
+        print("Issue with "+refseqID)
+        return None
     if protein_item.get_label(lang="en") == "":
         protein_item.set_label(protein_label, lang="en")
     if protein_item.get_description(lang="en") == "":
@@ -248,14 +253,17 @@ def create_or_update_refseq_protein_item(geneid, refseqID):
     if protein_item.get_description(lang="it") == "":
         protein_item.set_description("Proteina in " + taxonname, lang="it")
 
-    pprint.pprint(protein_item.get_wd_json_representation())
-    protein_qid = protein_item.write(login)
-    print(protein_qid)
+    # pprint.pprint(protein_item.get_wd_json_representation())
+    try_write(protein_item, record_id=geneid, record_prop="P637",
+              edit_summary="Updated a virus protein item with Refseq id", login=login, write=True)
+    print(protein_item.wd_item_id)
 
     ## add the newly create protein item to the gene item
-    encodes = [wdi_core.WDItemID(protein_qid, prop_nr="P688", references=[copy.deepcopy(ncbi_reference)])]
+    encodes = [wdi_core.WDItemID(protein_item.wd_item_id, prop_nr="P688", references=[copy.deepcopy(ncbi_reference)])]
     geneitem = wdi_core.WDItemEngine(wd_item_id=geneqid, data=encodes)
-    return geneitem.write(login)
+    try_write(geneitem, record_id=geneid, record_prop="P688",
+              edit_summary="Updated the encoded by statement with the just update protein item", login=login, write=True)
+    return protein_item.wd_item_id
 
 
 
@@ -319,11 +327,13 @@ for taxid in taxids:
 
         item = wdi_core.WDItemEngine(data=statements)
         # print(item.wd_item_id)
-        item.set_label(geneinfo["name"], lang="en")
-        item.set_description(scientificName + " gene", lang="en")
+        if item.get_label() == "":
+            item.set_label(geneinfo["name"], lang="en")
+        if item.get_description() == "":
+            item.set_description(scientificName + " gene", lang="en")
 
         # pprint.pprint(item.get_wd_json_representation()) ## get json for test purposes
-        print(item.write(login))  # write the wikidata item and return the QID
+        try_write(item,geneinfo["entrezgene"], "P351", login)
 
     """### Acquiring protein information
     Functions needed to acquire the protein information
